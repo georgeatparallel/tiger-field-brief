@@ -18,6 +18,10 @@ export type McpClientOptions = {
   authToken?: string
   /** MCP protocol version advertised to the server. */
   protocolVersion?: string
+  /** Identify the calling project on servers that accept a User-Agent. */
+  userAgent?: string
+  /** Optional per-request timeout, including reading the response body. */
+  timeoutMs?: number
 }
 
 export type McpContent = {
@@ -77,6 +81,7 @@ async function postJsonRpc(
     Accept: 'application/json, text/event-stream',
     'MCP-Protocol-Version': protocolVersion(opts),
   }
+  if (opts.userAgent) headers['User-Agent'] = opts.userAgent
   if (opts.authToken) headers.Authorization = `Bearer ${opts.authToken}`
   if (session?.sessionId && method !== 'initialize') {
     headers['Mcp-Session-Id'] = session.sessionId
@@ -85,6 +90,7 @@ async function postJsonRpc(
   const res = await fetch(opts.serverUrl, {
     method: 'POST',
     headers,
+    ...(opts.timeoutMs ? { signal: AbortSignal.timeout(opts.timeoutMs) } : {}),
     body: JSON.stringify({
       jsonrpc: '2.0',
       ...(expectResponse ? { id: ++requestId } : {}),

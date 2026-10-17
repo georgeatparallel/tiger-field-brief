@@ -3,6 +3,7 @@ import type {
   SourceSearchInput,
   SourceSearchResult,
 } from './types'
+import { callTool } from './mcp'
 import {
   MAX_RESULT_TEXT_CHARS,
   clampLimit,
@@ -19,7 +20,8 @@ import {
  * DEFAULT provider is **Tavily** — it returns a clean snippet/`content` field
  * per result which maps well to our normalized shape.
  *
- * Additional providers (Brave, Serper, Perplexity) are included so the provider
+ * Parallel uses anonymous MCP and requires no API key. Additional providers
+ * (Brave, Serper, Perplexity, Parallel) are included so the provider
  * can be swapped via env without code changes. To add another provider,
  * implement a function with the {@link ProviderFn} signature and register it in
  * `PROVIDERS`.
@@ -198,36 +200,98 @@ function toUsDate(value: string): string {
   return `${date.getUTCMonth() + 1}/${date.getUTCDate()}/${date.getUTCFullYear()}`
 }
 
+// --- Parallel Search MCP (anonymous, opt-in) ---------------------------------
+const parallel: ProviderFn = async (_apiKey, input) => {
+  const since = input.since ? toUtcDay(input.since) : undefined
+  const until = input.until ? toUtcDay(input.until) : undefined
+  const objective = [
+    input.query,
+    since ? `Find pages published on or after ${since}.` : '',
+    until ? `Find pages published on or before ${until}.` : '',
+  ].filter(Boolean).join('\n')
+  const response = await callTool(
+    {
+      serverUrl: endpoint('https://search.parallel.ai/mcp'),
+      userAgent: 'tiger-field-brief/0.1.0',
+      timeoutMs: 30_000,
+    },
+    'web_search',
+    { objective, search_queries: [input.query] },
+  )
+  // MCP returns structured content, with JSON text for clients using older
+  // protocol versions. Do not turn an unexpected response into an empty run.
+  const data: unknown = response.structured ?? JSON.parse(response.text)
+  if (!isRecord(data) || !Array.isArray(data.results)) {
+    throw new Error('Parallel search returned an invalid results payload.')
+  }
+  const captured = nowIso()
+  return data.results.filter(isRecord).map((r) => {
+    const published = pickString(r, 'publish_date')
+    const publishedAt = published && !Number.isNaN(Date.parse(published))
+      ? toUtcDay(published)
+      : undefined
+    return {
+      sourceType: 'web' as const,
+      sourceName: 'parallel',
+      title: pickString(r, 'title'),
+      url: pickString(r, 'url'),
+      publishedAt,
+      capturedAt: captured,
+      text: truncate(
+        Array.isArray(r.excerpts)
+          ? r.excerpts.filter((e): e is string => typeof e === 'string').join('\n\n')
+          : '',
+        MAX_RESULT_TEXT_CHARS,
+      ),
+      metadata: { query: input.query, searchId: pickString(data, 'search_id') },
+    }
+  }).filter((r) =>
+    // Unknown dates cannot establish that a result is inside a watchlist's
+    // lookback window. Bounds are inclusive UTC calendar dates.
+    (!since && !until) || (!!r.publishedAt &&
+      (!since || r.publishedAt >= since) && (!until || r.publishedAt <= until)),
+  ).slice(0, clampLimit(input.limit))
+}
+
+function toUtcDay(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    throw new Error('Parallel search date bounds must be valid dates.')
+  }
+  return date.toISOString().slice(0, 10)
+}
+
 const PROVIDERS: Record<string, ProviderFn> = {
   tavily,
   brave,
   serper,
   perplexity,
+  parallel,
 }
 
 export const webConnector: SourceConnector = {
   type: 'web',
   name: 'Web Search',
   requiredEnv: [
-    'WEB_SEARCH_API_KEY or PERPLEXITY_API_KEY',
-    'WEB_SEARCH_PROVIDER (optional)',
+    'WEB_SEARCH_PROVIDER=parallel, or WEB_SEARCH_API_KEY / PERPLEXITY_API_KEY',
   ],
   configHint:
-    'Set WEB_SEARCH_API_KEY. Optionally set WEB_SEARCH_PROVIDER (tavily | brave | serper | perplexity; default tavily). For Perplexity, PERPLEXITY_API_KEY is also supported.',
+    'Set WEB_SEARCH_PROVIDER=parallel for keyless web search. Other providers use WEB_SEARCH_API_KEY (tavily | brave | serper | perplexity; default tavily). Perplexity also supports PERPLEXITY_API_KEY.',
   isConfigured() {
     const selected = provider()
-    return !!apiKeyForProvider(selected) && selected in PROVIDERS
+    return selected in PROVIDERS && (selected === 'parallel' || !!apiKeyForProvider(selected))
   },
   async search(input) {
     const selected = provider()
-    const apiKey = apiKeyForProvider(selected)
-    if (!apiKey) throw new Error('Web search is not configured.')
+    // Never forward another provider's stored credentials to anonymous MCP.
+    const apiKey = selected === 'parallel' ? '' : apiKeyForProvider(selected)
+    if (selected !== 'parallel' && !apiKey) throw new Error('Web search is not configured.')
     const fn = PROVIDERS[selected]
     if (!fn) {
       throw new Error(
-        `Unsupported WEB_SEARCH_PROVIDER "${selected}". Use tavily, brave, serper, or perplexity.`,
+        `Unsupported WEB_SEARCH_PROVIDER "${selected}". Use tavily, brave, serper, perplexity, or parallel.`,
       )
     }
-    return fn(apiKey, input)
+    return fn(apiKey ?? '', input)
   },
 }

@@ -124,12 +124,13 @@ and environment-variable driven; if a source is not configured it shows as
 
 ### 1. Web search
 
-Set an API key and (optionally) pick a provider. **Tavily is the default.**
+For Tavily, Brave, Serper, or Perplexity, set an API key and optionally pick a
+provider. **Tavily is the default.**
 If `PERPLEXITY_API_KEY` is set and `WEB_SEARCH_PROVIDER` is unset, the app uses
 Perplexity automatically.
 
 ```dotenv
-WEB_SEARCH_PROVIDER="tavily"   # tavily (default) | brave | serper | perplexity
+WEB_SEARCH_PROVIDER="tavily"   # tavily (default) | brave | serper | perplexity | parallel
 WEB_SEARCH_API_KEY="..."
 PERPLEXITY_API_KEY="..."       # optional; preferred for WEB_SEARCH_PROVIDER=perplexity
 WEB_SEARCH_BASE_URL=""         # optional: override host (proxy / self-hosted / testing)
@@ -138,6 +139,28 @@ WEB_SEARCH_BASE_URL=""         # optional: override host (proxy / self-hosted / 
 Returns page title, URL, snippet/extracted text, published date (when
 available), and a captured timestamp. To add a provider, implement a function in
 `src/lib/sources/web.ts` and register it in `PROVIDERS`.
+
+For free web search without an account or search API key, select
+[Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp):
+
+```dotenv
+WEB_SEARCH_PROVIDER="parallel"
+```
+
+Restart the app, confirm Web Search is configured at `/sources`, then choose
+**Web Search** at `/sources/search` or **web** in a watchlist. Parallel uses Fast mode over
+Streamable HTTP at `https://search.parallel.ai/mcp` and returns page excerpts
+for the existing search-to-brief flow. No search API key is sent, even if other
+provider keys are set. Anonymous access has lower rate limits and is intended
+for light use; source errors appear on the search page or in watchlist status.
+
+The result limit is applied locally to the returned batch, so fewer results may
+be available. Since/until bounds use inclusive UTC calendar dates and exclude
+results with unknown publication dates. Requests time out after 30 seconds.
+`WEB_SEARCH_BASE_URL` also applies to Parallel, replacing the host while keeping
+the `/mcp` path. Leave it unset to use the public service. Existing provider
+defaults and Perplexity auto-selection remain unchanged unless you explicitly
+select Parallel.
 
 ### 2. X (Twitter) via MCP
 
@@ -249,7 +272,7 @@ src/server/sources.ts          # server fns: source search / runs / generate-fro
 src/server/intelligence.ts     # watchlists, scheduled runs, weekly reports, action queue
 src/lib/sources/               # read-only source connector layer
   types.ts                     #   shared SourceConnector / SourceSearchResult types
-  web.ts                       #   web search (tavily | brave | serper)
+  web.ts                       #   web search (tavily | brave | serper | perplexity | parallel)
   x.ts                         #   X via MCP (read-only)
   slack.ts                     #   Slack via MCP or Web API (read-only)
   mcp.ts                       #   minimal MCP JSON-RPC client
